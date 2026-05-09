@@ -5,7 +5,7 @@ import { logger } from "../utils/logger.js";
 import { AlpacaClient } from "./alpaca-client.js";
 import { OrderManager } from "./order-manager.js";
 import { SignalFilter } from "./signal-filter.js";
-import { markRebalanceRun, openStockPositions } from "../db/queries.js";
+import { clearRebalanceRun, markRebalanceRun, openStockPositions } from "../db/queries.js";
 
 export class Rebalancer {
   private readonly signalFilter: SignalFilter;
@@ -29,7 +29,13 @@ export class Rebalancer {
       return;
     }
     if (!markRebalanceRun(this.db, first.fundCik, first.reportDate)) return;
-    await this.executeDiffs(diffs, first.fundCik, first.reportDate);
+    try {
+      await this.executeDiffs(diffs, first.fundCik, first.reportDate);
+    } catch (error) {
+      logger.error({ error, fundCik: first.fundCik, reportDate: first.reportDate }, "rebalance failed; clearing claim so it can be retried");
+      clearRebalanceRun(this.db, first.fundCik, first.reportDate);
+      throw error;
+    }
   }
 
   async runDueRebalances() {
@@ -48,7 +54,12 @@ export class Rebalancer {
         .prepare("SELECT * FROM fund_holdings WHERE fund_cik = ? AND report_date = ? AND change_type IS NOT NULL")
         .all(row.fund_cik, row.report_date)
         .map(mapHolding);
-      await this.executeDiffs(diffs, row.fund_cik, row.report_date);
+      try {
+        await this.executeDiffs(diffs, row.fund_cik, row.report_date);
+      } catch (error) {
+        logger.error({ error, fundCik: row.fund_cik, reportDate: row.report_date }, "rebalance failed; clearing claim so it can be retried");
+        clearRebalanceRun(this.db, row.fund_cik, row.report_date);
+      }
     }
   }
 

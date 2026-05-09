@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import type { ServerResponse } from "node:http";
 import { config } from "../config.js";
 import { getDb } from "../db/queries.js";
 import { alertsRoutes } from "./routes/alerts.js";
@@ -8,6 +9,19 @@ import { rankingsRoutes } from "./routes/rankings.js";
 import { senatorsRoutes } from "./routes/senators.js";
 import { tradesRoutes } from "./routes/trades.js";
 import { FUND_MANAGERS } from "../tracking/fund-manager-tracker.js";
+
+const sseClients = new Set<ServerResponse>();
+
+export function broadcastSSE(event: string, data: unknown) {
+  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const client of sseClients) {
+    try {
+      client.write(payload);
+    } catch {
+      sseClients.delete(client);
+    }
+  }
+}
 
 export function buildServer() {
   const server = Fastify({ logger: true, ignoreTrailingSlash: true });
@@ -38,9 +52,13 @@ export function buildServer() {
       "Access-Control-Allow-Origin": "http://localhost:5173"
     });
     const timer = setInterval(() => {
-      reply.raw.write(`data: ${JSON.stringify({ type: "heartbeat", at: new Date().toISOString() })}\n\n`);
+      reply.raw.write(`event: heartbeat\ndata: ${JSON.stringify({ at: new Date().toISOString() })}\n\n`);
     }, 15_000);
-    reply.raw.on("close", () => { clearInterval(timer); });
+    sseClients.add(reply.raw);
+    reply.raw.on("close", () => {
+      clearInterval(timer);
+      sseClients.delete(reply.raw);
+    });
   });
 
   return server;

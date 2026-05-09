@@ -57,7 +57,7 @@ export class PositionMonitor {
 
     if (position.sleeve === "senator") {
       if (pnlRatio !== null && pnlRatio >= 0.15 && !position.trailingStopActive) await this.activateTrailingStop(position, 8);
-      if (pnlRatio !== null && pnlRatio >= 0.25 && position.status === "open") {
+      if (pnlRatio !== null && pnlRatio >= 0.25 && position.status === "open" && (position.pendingExitQty ?? 0) === 0) {
         await this.sellHalf(position, "take_profit");
         return;
       }
@@ -176,11 +176,18 @@ export class PositionMonitor {
       markStockPositionTimeCheck(this.db, position.id, "day30_checked");
       await this.alert("time_stop", position, { action: "day30_flag", pnlRatio });
     }
-    if (ageDays >= 60 && !position.day60ExitedHalf && pnlRatio >= -0.05 && pnlRatio <= 0.05) {
-      await this.sellHalf(position, "time_stop");
-    }
+
+    // Skip time-stop actions while any sell is already pending for this position.
+    // Prevents day-60 half-sell and day-90 full-exit from queueing overlapping orders,
+    // and prevents re-queueing the same half-exit before its fill flips day60_exited_half.
+    if ((position.pendingExitQty ?? 0) > 0) return;
+
     if (ageDays >= 90 && !position.trailingStopActive) {
       await this.exit(position, "time_stop");
+      return;
+    }
+    if (ageDays >= 60 && !position.day60ExitedHalf && pnlRatio >= -0.05 && pnlRatio <= 0.05) {
+      await this.sellHalf(position, "time_stop");
     }
   }
 

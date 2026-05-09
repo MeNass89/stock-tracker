@@ -510,6 +510,10 @@ export function markRebalanceRun(db: Database.Database, fundCik: string, reportD
   return result.changes > 0;
 }
 
+export function clearRebalanceRun(db: Database.Database, fundCik: string, reportDate: string) {
+  db.prepare("DELETE FROM rebalance_runs WHERE fund_cik = ? AND report_date = ?").run(fundCik, reportDate);
+}
+
 export function insertPortfolioSnapshot(
   db: Database.Database,
   snapshot: {

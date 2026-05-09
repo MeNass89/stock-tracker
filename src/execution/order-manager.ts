@@ -125,6 +125,7 @@ export class OrderManager {
       if (!execution.alpacaOrderId) continue;
       const order = await this.alpaca.getOrder(execution.alpacaOrderId);
       const status = mapOrderStatus(order.status);
+      const previouslyFilledQty = execution.filledQuantity ?? 0;
       updateStockExecutionFill(this.db, execution.id, {
         status,
         filledPrice: money(order.filled_avg_price ?? undefined) || null,
@@ -132,44 +133,50 @@ export class OrderManager {
         amountUsd: order.notional ? money(order.notional) : execution.amountUsd
       });
 
-      if (status === "filled") {
-        if (execution.direction === "buy") {
-          await this.createPositionIfNeeded(execution.id, order, {
-            sleeve: execution.sleeve,
-            triggerType: execution.triggerType,
-            ticker: execution.ticker,
-            senatorName: execution.senatorName,
-            senatorRank: execution.senatorRank,
-            fundName: execution.fundName,
-            sector: null
-          });
-        } else if (execution.direction === "sell") {
-          if (!execution.positionId) {
-            logger.error({ executionId: execution.id, ticker: execution.ticker }, "sell fill missing position_id; flagging for manual reconciliation");
-            markExecutionReconcileFailed(this.db, execution.id, "sell fill missing position_id");
-            continue;
-          }
-          const position = findPositionById(this.db, execution.positionId);
-          if (!position) {
-            logger.error({ executionId: execution.id, positionId: execution.positionId }, "sell fill references unknown position; flagging for manual reconciliation");
-            markExecutionReconcileFailed(this.db, execution.id, `position ${execution.positionId} not found`);
-            addPendingExit(this.db, execution.positionId, -execution.quantity);
-            continue;
-          }
+      if (status === "filled" && execution.direction === "buy") {
+        await this.createPositionIfNeeded(execution.id, order, {
+          sleeve: execution.sleeve,
+          triggerType: execution.triggerType,
+          ticker: execution.ticker,
+          senatorName: execution.senatorName,
+          senatorRank: execution.senatorRank,
+          fundName: execution.fundName,
+          sector: null
+        });
+      } else if ((status === "filled" || status === "partial") && execution.direction === "sell") {
+        if (!execution.positionId) {
+          logger.error({ executionId: execution.id, ticker: execution.ticker }, "sell fill missing position_id; flagging for manual reconciliation");
+          markExecutionReconcileFailed(this.db, execution.id, "sell fill missing position_id");
+          continue;
+        }
+        const position = findPositionById(this.db, execution.positionId);
+        if (!position) {
+          logger.error({ executionId: execution.id, positionId: execution.positionId }, "sell fill references unknown position; flagging for manual reconciliation");
+          markExecutionReconcileFailed(this.db, execution.id, `position ${execution.positionId} not found`);
+          addPendingExit(this.db, execution.positionId, -execution.quantity);
+          continue;
+        }
+        const totalFilledQty = money(order.filled_qty);
+        const deltaQty = Math.max(0, totalFilledQty - previouslyFilledQty);
+        if (deltaQty > 0) {
           const filledPrice = money(order.filled_avg_price ?? undefined);
-          const filledQty = money(order.filled_qty);
-          const slicePnlUsd = filledPrice > 0 ? (filledPrice - position.avgEntryPrice) * filledQty : null;
+          const slicePnlUsd = filledPrice > 0 ? (filledPrice - position.avgEntryPrice) * deltaQty : null;
           if (slicePnlUsd !== null && slicePnlUsd < 0) this.trackWashSaleIfNeeded(position.ticker, slicePnlUsd);
-          const remainingAfter = Math.max(0, position.quantity - filledQty);
-          if (remainingAfter <= 0) {
-            closeStockPosition(this.db, position.id, execution.triggerType ?? "manual", slicePnlUsd, filledQty);
+          const remainingAfter = Math.max(0, position.quantity - deltaQty);
+          if (status === "filled" && remainingAfter <= 0) {
+            closeStockPosition(this.db, position.id, execution.triggerType ?? "manual", slicePnlUsd, deltaQty);
           } else {
-            applyPartialFill(this.db, position.id, filledQty, slicePnlUsd);
-            applyPostFillAction(this.db, execution.id);
+            applyPartialFill(this.db, position.id, deltaQty, slicePnlUsd);
+            if (status === "filled") applyPostFillAction(this.db, execution.id);
           }
         }
       } else if (this.shouldCancelByEndOfDay(execution.createdAt)) {
         await this.alpaca.cancelOrder(execution.alpacaOrderId);
+        if (execution.direction === "sell" && execution.positionId) {
+          const totalFilled = money(order.filled_qty);
+          const unfilled = Math.max(0, execution.quantity - totalFilled);
+          if (unfilled > 0) addPendingExit(this.db, execution.positionId, -unfilled);
+        }
         updateStockExecutionOrder(this.db, execution.id, { status: "cancelled", notes: "cancelled at 15:45 ET cutoff" });
       } else if (this.shouldResubmit(execution.createdAt)) {
         await this.resubmitLimit(execution.id, order);
