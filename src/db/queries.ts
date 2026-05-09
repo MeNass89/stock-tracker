@@ -475,9 +475,10 @@ export function applyPartialFill(
          pending_exit_qty = MAX(0, COALESCE(pending_exit_qty, 0) - ?),
          realized_pnl_usd = COALESCE(realized_pnl_usd, 0) + COALESCE(?, 0),
          realized_qty = COALESCE(realized_qty, 0) + ?,
-         status = CASE WHEN MAX(0, quantity - ?) <= 0 THEN 'closed' ELSE 'partial' END
+         status = CASE WHEN MAX(0, quantity - ?) <= 0 THEN 'closed' ELSE 'partial' END,
+         closed_at = CASE WHEN MAX(0, quantity - ?) <= 0 THEN CURRENT_TIMESTAMP ELSE closed_at END
      WHERE id = ?`
-  ).run(filledQuantity, filledQuantity, slicePnlUsd ?? null, filledQuantity, filledQuantity, positionId);
+  ).run(filledQuantity, filledQuantity, slicePnlUsd ?? null, filledQuantity, filledQuantity, filledQuantity, positionId);
 }
 
 export function applyPostFillAction(db: Database.Database, executionId: number) {
@@ -504,13 +505,9 @@ export function findPositionById(db: Database.Database, id: number) {
   return row ? mapStockPosition(row) : null;
 }
 
-export function hasRebalanceRun(db: Database.Database, fundCik: string, reportDate: string) {
-  const row = db.prepare("SELECT 1 AS hit FROM rebalance_runs WHERE fund_cik = ? AND report_date = ?").get(fundCik, reportDate) as { hit: number } | undefined;
-  return Boolean(row);
-}
-
-export function markRebalanceRun(db: Database.Database, fundCik: string, reportDate: string) {
-  db.prepare("INSERT OR IGNORE INTO rebalance_runs (fund_cik, report_date) VALUES (?, ?)").run(fundCik, reportDate);
+export function markRebalanceRun(db: Database.Database, fundCik: string, reportDate: string): boolean {
+  const result = db.prepare("INSERT OR IGNORE INTO rebalance_runs (fund_cik, report_date) VALUES (?, ?)").run(fundCik, reportDate);
+  return result.changes > 0;
 }
 
 export function insertPortfolioSnapshot(

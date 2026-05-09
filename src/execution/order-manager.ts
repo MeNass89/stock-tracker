@@ -153,6 +153,7 @@ export class OrderManager {
           if (!position) {
             logger.error({ executionId: execution.id, positionId: execution.positionId }, "sell fill references unknown position; flagging for manual reconciliation");
             markExecutionReconcileFailed(this.db, execution.id, `position ${execution.positionId} not found`);
+            addPendingExit(this.db, execution.positionId, -execution.quantity);
             continue;
           }
           const filledPrice = money(order.filled_avg_price ?? undefined);
@@ -206,6 +207,9 @@ export class OrderManager {
       postFillAction
     });
 
+    // Reserve before yielding to Alpaca so concurrent exits see pending quantity.
+    addPendingExit(this.db, positionId, quantity);
+
     const isFractional = quantity % 1 !== 0;
     let order: AlpacaOrder;
     try {
@@ -218,6 +222,7 @@ export class OrderManager {
         client_order_id: `st-exit-${executionId}-${Date.now()}`
       });
     } catch (error) {
+      addPendingExit(this.db, positionId, -quantity);
       updateStockExecutionOrder(this.db, executionId, {
         status: "failed",
         notes: `submit failed: ${error instanceof Error ? error.message : String(error)}`
@@ -225,7 +230,6 @@ export class OrderManager {
       throw error;
     }
 
-    addPendingExit(this.db, positionId, quantity);
     updateStockExecutionOrder(this.db, executionId, {
       alpacaOrderId: order.id,
       alpacaClientOrderId: order.client_order_id,

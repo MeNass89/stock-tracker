@@ -5,7 +5,7 @@ import { logger } from "../utils/logger.js";
 import { AlpacaClient } from "./alpaca-client.js";
 import { OrderManager } from "./order-manager.js";
 import { SignalFilter } from "./signal-filter.js";
-import { hasRebalanceRun, markRebalanceRun, openStockPositions } from "../db/queries.js";
+import { markRebalanceRun, openStockPositions } from "../db/queries.js";
 
 export class Rebalancer {
   private readonly signalFilter: SignalFilter;
@@ -24,11 +24,11 @@ export class Rebalancer {
     if (diffs.length === 0) return;
     const first = diffs[0];
     if (!first) return;
-    if (hasRebalanceRun(this.db, first.fundCik, first.reportDate)) return;
     if (!this.isRebalanceWindow(first.filingDate)) {
       logger.info({ filingDate: first.filingDate, fundName: first.fundName, fundCik: first.fundCik }, "13F filing queued until delayed rebalance window");
       return;
     }
+    if (!markRebalanceRun(this.db, first.fundCik, first.reportDate)) return;
     await this.executeDiffs(diffs, first.fundCik, first.reportDate);
   }
 
@@ -43,7 +43,7 @@ export class Rebalancer {
       .all() as { fund_cik: string; report_date: string }[];
 
     for (const row of rows) {
-      if (hasRebalanceRun(this.db, row.fund_cik, row.report_date)) continue;
+      if (!markRebalanceRun(this.db, row.fund_cik, row.report_date)) continue;
       const diffs = this.db
         .prepare("SELECT * FROM fund_holdings WHERE fund_cik = ? AND report_date = ? AND change_type IS NOT NULL")
         .all(row.fund_cik, row.report_date)
@@ -74,7 +74,6 @@ export class Rebalancer {
       await this.orderManager.submitSignal(decision);
     }
 
-    markRebalanceRun(this.db, fundCik, reportDate);
     try {
       await this.alertEngine?.executionNotification({
         type: "rebalance",

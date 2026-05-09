@@ -36,7 +36,9 @@ export class PositionMonitor {
     const alpacaPosition = await this.alpaca.getPosition(position.ticker);
     const currentPrice = alpacaPosition ? money(alpacaPosition.current_price) : position.currentPrice ?? position.avgEntryPrice;
     const pnlUsd = (currentPrice - position.avgEntryPrice) * position.quantity;
-    const pnlRatio = (currentPrice - position.avgEntryPrice) / position.avgEntryPrice;
+    const pnlRatio = position.avgEntryPrice > 0
+      ? (currentPrice - position.avgEntryPrice) / position.avgEntryPrice
+      : null;
     updateStockPositionMarket(this.db, position.id, { currentPrice, pnlUsd, pnlRatio });
 
     if (this.flashCrash(position, currentPrice)) {
@@ -54,18 +56,18 @@ export class PositionMonitor {
     if (await this.softStopTriggered(position, currentPrice)) return;
 
     if (position.sleeve === "senator") {
-      if (pnlRatio >= 0.15 && !position.trailingStopActive) await this.activateTrailingStop(position, 8);
-      if (pnlRatio >= 0.25 && position.status === "open") {
+      if (pnlRatio !== null && pnlRatio >= 0.15 && !position.trailingStopActive) await this.activateTrailingStop(position, 8);
+      if (pnlRatio !== null && pnlRatio >= 0.25 && position.status === "open") {
         await this.sellHalf(position, "take_profit");
         return;
       }
-      if (pnlRatio <= -0.15) {
+      if (pnlRatio !== null && pnlRatio <= -0.15) {
         await this.exit(position, "time_stop");
         return;
       }
-      await this.checkSenatorTimeStops(position, pnlRatio);
+      if (pnlRatio !== null) await this.checkSenatorTimeStops(position, pnlRatio);
     } else {
-      if (pnlRatio >= 0.2 && !position.trailingStopActive) await this.activateTrailingStop(position, 8);
+      if (pnlRatio !== null && pnlRatio >= 0.2 && !position.trailingStopActive) await this.activateTrailingStop(position, 8);
     }
   }
 
@@ -95,7 +97,9 @@ export class PositionMonitor {
     );
     await this.orderManager.submitMarketExit(position.id, position.ticker, position.quantity, reason, position.sleeve, true);
     const pnlUsd = (currentPrice - position.avgEntryPrice) * position.quantity;
-    const pnlRatio = (currentPrice - position.avgEntryPrice) / position.avgEntryPrice;
+    const pnlRatio = position.avgEntryPrice > 0
+      ? (currentPrice - position.avgEntryPrice) / position.avgEntryPrice
+      : null;
     await this.alert("stop_triggered", position, { exitReason: "soft_stop", pnlUsd, pnlRatio });
     return true;
   }
