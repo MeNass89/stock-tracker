@@ -61,7 +61,7 @@ export class PositionMonitor {
         await this.sellHalf(position, "take_profit");
         return;
       }
-      if (pnlRatio !== null && pnlRatio <= -0.15) {
+      if (pnlRatio !== null && pnlRatio <= -0.15 && (position.pendingExitQty ?? 0) === 0) {
         await this.exit(position, "time_stop");
         return;
       }
@@ -90,6 +90,7 @@ export class PositionMonitor {
   private async softStopTriggered(position: StockPosition, currentPrice: number) {
     if (!position.stopLossPrice || currentPrice > position.stopLossPrice) return false;
     if (position.stopLossOrderId || position.trailingStopOrderId) return false;
+    if ((position.pendingExitQty ?? 0) > 0) return false;
     const reason = position.sleeve === "13f" ? "fund_exit" : "stop_loss";
     logger.warn(
       { positionId: position.id, ticker: position.ticker, currentPrice, stopLossPrice: position.stopLossPrice },

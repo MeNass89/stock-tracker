@@ -143,7 +143,7 @@ export class OrderManager {
           fundName: execution.fundName,
           sector: null
         });
-      } else if ((status === "filled" || status === "partial") && execution.direction === "sell") {
+      } else if (execution.direction === "sell" && (status === "filled" || status === "partial" || status === "cancelled" || status === "expired")) {
         if (!execution.positionId) {
           logger.error({ executionId: execution.id, ticker: execution.ticker }, "sell fill missing position_id; flagging for manual reconciliation");
           markExecutionReconcileFailed(this.db, execution.id, "sell fill missing position_id");
@@ -153,7 +153,6 @@ export class OrderManager {
         if (!position) {
           logger.error({ executionId: execution.id, positionId: execution.positionId }, "sell fill references unknown position; flagging for manual reconciliation");
           markExecutionReconcileFailed(this.db, execution.id, `position ${execution.positionId} not found`);
-          addPendingExit(this.db, execution.positionId, -execution.quantity);
           continue;
         }
         const totalFilledQty = money(order.filled_qty);
@@ -169,6 +168,12 @@ export class OrderManager {
             applyPartialFill(this.db, position.id, deltaQty, slicePnlUsd);
             if (status === "filled") applyPostFillAction(this.db, execution.id);
           }
+        }
+        if (status === "cancelled" || status === "expired") {
+          const unfilled = Math.max(0, execution.quantity - totalFilledQty);
+          if (unfilled > 0) addPendingExit(this.db, execution.positionId, -unfilled);
+          updateStockExecutionOrder(this.db, execution.id, { status, notes: `alpaca ${status}` });
+          continue;
         }
       } else if (this.shouldCancelByEndOfDay(execution.createdAt)) {
         await this.alpaca.cancelOrder(execution.alpacaOrderId);

@@ -5,7 +5,7 @@ import { logger } from "../utils/logger.js";
 import { AlpacaClient } from "./alpaca-client.js";
 import { OrderManager } from "./order-manager.js";
 import { SignalFilter } from "./signal-filter.js";
-import { clearRebalanceRun, markRebalanceRun, openStockPositions } from "../db/queries.js";
+import { clearRebalanceRun, completeRebalanceRun, markRebalanceRun, openStockPositions } from "../db/queries.js";
 
 export class Rebalancer {
   private readonly signalFilter: SignalFilter;
@@ -31,6 +31,7 @@ export class Rebalancer {
     if (!markRebalanceRun(this.db, first.fundCik, first.reportDate)) return;
     try {
       await this.executeDiffs(diffs, first.fundCik, first.reportDate);
+      completeRebalanceRun(this.db, first.fundCik, first.reportDate);
     } catch (error) {
       logger.error({ error, fundCik: first.fundCik, reportDate: first.reportDate }, "rebalance failed; clearing claim so it can be retried");
       clearRebalanceRun(this.db, first.fundCik, first.reportDate);
@@ -56,6 +57,7 @@ export class Rebalancer {
         .map(mapHolding);
       try {
         await this.executeDiffs(diffs, row.fund_cik, row.report_date);
+        completeRebalanceRun(this.db, row.fund_cik, row.report_date);
       } catch (error) {
         logger.error({ error, fundCik: row.fund_cik, reportDate: row.report_date }, "rebalance failed; clearing claim so it can be retried");
         clearRebalanceRun(this.db, row.fund_cik, row.report_date);
@@ -65,11 +67,19 @@ export class Rebalancer {
 
   private async executeDiffs(diffs: FundHoldingInput[], fundCik: string, reportDate: string) {
     const exitsByTicker = this.crossFundExits(diffs);
+    const fullyExitedTickers = new Set<string>();
     for (const [ticker, count] of exitsByTicker) {
-      if (count >= 2) await this.exitTicker(ticker, "fund_exit");
+      if (count >= 2) {
+        fullyExitedTickers.add(ticker);
+        await this.exitTicker(ticker, "fund_exit");
+      }
     }
 
-    const sells = diffs.filter((holding) => holding.changeType === "exit" || (holding.changeType === "decrease" && Math.abs(holding.changePct ?? 0) >= 0.25));
+    const sells = diffs.filter((holding) => {
+      const ticker = holding.ticker?.toUpperCase();
+      if (ticker && fullyExitedTickers.has(ticker)) return false;
+      return holding.changeType === "exit" || (holding.changeType === "decrease" && Math.abs(holding.changePct ?? 0) >= 0.25);
+    });
     const buys = diffs.filter((holding) => holding.changeType === "new" || (holding.changeType === "increase" && (holding.changePct ?? 0) >= 0.25));
 
     for (const holding of sells) {

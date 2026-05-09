@@ -388,13 +388,20 @@ export function updateStockPositionMarket(
   id: number,
   input: { currentPrice?: number | null; pnlUsd?: number | null; pnlRatio?: number | null }
 ) {
+  const hasPnlRatio = Object.prototype.hasOwnProperty.call(input, "pnlRatio");
   db.prepare(
     `UPDATE stock_positions
      SET current_price = coalesce(?, current_price),
          pnl_usd = coalesce(?, pnl_usd),
-         pnl_ratio = coalesce(?, pnl_ratio)
+         pnl_ratio = CASE WHEN ? = 1 THEN ? ELSE pnl_ratio END
      WHERE id = ?`
-  ).run(input.currentPrice ?? null, input.pnlUsd ?? null, input.pnlRatio ?? null, id);
+  ).run(
+    input.currentPrice ?? null,
+    input.pnlUsd ?? null,
+    hasPnlRatio ? 1 : 0,
+    input.pnlRatio ?? null,
+    id
+  );
 }
 
 export function updateStockPositionStops(
@@ -433,7 +440,8 @@ export function closeStockPosition(
 ) {
   db.prepare(
     `UPDATE stock_positions
-     SET status = 'closed',
+     SET quantity = MAX(0, quantity - COALESCE(?, quantity)),
+         status = 'closed',
          closed_at = datetime('now'),
          exit_reason = ?,
          realized_pnl_usd = COALESCE(realized_pnl_usd, 0) + COALESCE(?, 0),
@@ -448,6 +456,7 @@ export function closeStockPosition(
          pending_exit_qty = 0
      WHERE id = ?`
   ).run(
+    sliceFilledQty ?? null,
     exitReason,
     slicePnlUsd ?? null,
     sliceFilledQty ?? null,
@@ -492,12 +501,27 @@ export function applyPostFillAction(db: Database.Database, executionId: number) 
 }
 
 export function markExecutionReconcileFailed(db: Database.Database, executionId: number, reason: string) {
-  db.prepare(
-    `UPDATE stock_executions
-     SET status = 'failed',
-         notes = COALESCE(notes, '') || ' | RECONCILE_FAILED: ' || ?
-     WHERE id = ?`
-  ).run(reason, executionId);
+  const tx = db.transaction(() => {
+    const execution = db.prepare(
+      "SELECT direction, position_id, quantity FROM stock_executions WHERE id = ?"
+    ).get(executionId) as { direction: string; position_id: number | null; quantity: number } | undefined;
+
+    db.prepare(
+      `UPDATE stock_executions
+       SET status = 'failed',
+           notes = COALESCE(notes, '') || ' | RECONCILE_FAILED: ' || ?
+       WHERE id = ?`
+    ).run(reason, executionId);
+
+    if (execution?.direction === "sell" && execution.position_id) {
+      db.prepare(
+        `UPDATE stock_positions
+         SET pending_exit_qty = MAX(0, COALESCE(pending_exit_qty, 0) - ?)
+         WHERE id = ?`
+      ).run(execution.quantity, execution.position_id);
+    }
+  });
+  tx();
 }
 
 export function findPositionById(db: Database.Database, id: number) {
@@ -506,12 +530,16 @@ export function findPositionById(db: Database.Database, id: number) {
 }
 
 export function markRebalanceRun(db: Database.Database, fundCik: string, reportDate: string): boolean {
-  const result = db.prepare("INSERT OR IGNORE INTO rebalance_runs (fund_cik, report_date) VALUES (?, ?)").run(fundCik, reportDate);
+  const result = db.prepare("INSERT OR IGNORE INTO rebalance_runs (fund_cik, report_date, completed_at) VALUES (?, ?, NULL)").run(fundCik, reportDate);
   return result.changes > 0;
 }
 
 export function clearRebalanceRun(db: Database.Database, fundCik: string, reportDate: string) {
   db.prepare("DELETE FROM rebalance_runs WHERE fund_cik = ? AND report_date = ?").run(fundCik, reportDate);
+}
+
+export function completeRebalanceRun(db: Database.Database, fundCik: string, reportDate: string) {
+  db.prepare("UPDATE rebalance_runs SET completed_at = datetime('now') WHERE fund_cik = ? AND report_date = ?").run(fundCik, reportDate);
 }
 
 export function insertPortfolioSnapshot(

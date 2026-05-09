@@ -168,7 +168,7 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
 CREATE TABLE IF NOT EXISTS rebalance_runs (
   fund_cik TEXT NOT NULL,
   report_date TEXT NOT NULL,
-  completed_at TEXT DEFAULT (datetime('now')),
+  completed_at TEXT,
   PRIMARY KEY (fund_cik, report_date)
 );
 
@@ -206,7 +206,7 @@ const idempotentMigrations: string[] = [
   `CREATE TABLE IF NOT EXISTS rebalance_runs (
     fund_cik TEXT NOT NULL,
     report_date TEXT NOT NULL,
-    completed_at TEXT DEFAULT (datetime('now')),
+    completed_at TEXT,
     PRIMARY KEY (fund_cik, report_date)
   )`
 ];
