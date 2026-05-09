@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import type { AlertEngine } from "../alerting/alert-engine.js";
 import {
+  applyPartialFill,
   closeStockPosition,
   insertWashSale,
   markStockPositionTimeCheck,
@@ -57,6 +58,8 @@ export class PositionMonitor {
 
     if (position.sleeve === "senator") {
       if (pnlRatio !== null && pnlRatio >= 0.15 && !position.trailingStopActive) await this.activateTrailingStop(position, 8);
+      const restingStop = Boolean(position.stopLossOrderId || position.trailingStopOrderId);
+      if (restingStop) return;
       if (pnlRatio !== null && pnlRatio >= 0.25 && position.status === "open" && (position.pendingExitQty ?? 0) === 0) {
         await this.sellHalf(position, "take_profit");
         return;
@@ -68,6 +71,8 @@ export class PositionMonitor {
       if (pnlRatio !== null) await this.checkSenatorTimeStops(position, pnlRatio);
     } else {
       if (pnlRatio !== null && pnlRatio >= 0.2 && !position.trailingStopActive) await this.activateTrailingStop(position, 8);
+      const restingStop = Boolean(position.stopLossOrderId || position.trailingStopOrderId);
+      if (restingStop) return;
     }
   }
 
@@ -141,7 +146,11 @@ export class PositionMonitor {
       const pnlUsd = (filledPrice - position.avgEntryPrice) * filledQty;
       const pnlRatio = position.avgEntryPrice > 0 ? (filledPrice - position.avgEntryPrice) / position.avgEntryPrice : null;
       const exitReason = orderId === position.trailingStopOrderId ? "trailing_stop" : "stop_loss";
-      closeStockPosition(this.db, position.id, exitReason, pnlUsd, filledQty);
+      if (filledQty < position.quantity) {
+        applyPartialFill(this.db, position.id, filledQty, pnlUsd);
+      } else {
+        closeStockPosition(this.db, position.id, exitReason, pnlUsd, filledQty);
+      }
       this.trackWashSaleIfNeeded(position.ticker, pnlUsd, order.filled_at ?? new Date().toISOString());
       await this.alert("stop_triggered", position, { exitReason, pnlUsd, pnlRatio });
       return true;

@@ -485,9 +485,36 @@ export function applyPartialFill(
          realized_pnl_usd = COALESCE(realized_pnl_usd, 0) + COALESCE(?, 0),
          realized_qty = COALESCE(realized_qty, 0) + ?,
          status = CASE WHEN MAX(0, quantity - ?) <= 0 THEN 'closed' ELSE 'partial' END,
-         closed_at = CASE WHEN MAX(0, quantity - ?) <= 0 THEN CURRENT_TIMESTAMP ELSE closed_at END
+         closed_at = CASE WHEN MAX(0, quantity - ?) <= 0 THEN CURRENT_TIMESTAMP ELSE closed_at END,
+         pnl_usd = CASE
+           WHEN MAX(0, quantity - ?) <= 0
+             THEN COALESCE(realized_pnl_usd, 0) + COALESCE(?, 0)
+           ELSE pnl_usd
+         END,
+         pnl_ratio = CASE
+           WHEN MAX(0, quantity - ?) <= 0
+             AND avg_entry_price > 0
+             AND (COALESCE(realized_qty, 0) + ?) > 0
+             THEN (COALESCE(realized_pnl_usd, 0) + COALESCE(?, 0))
+                  / (avg_entry_price * (COALESCE(realized_qty, 0) + ?))
+           ELSE pnl_ratio
+         END
      WHERE id = ?`
-  ).run(filledQuantity, filledQuantity, slicePnlUsd ?? null, filledQuantity, filledQuantity, filledQuantity, positionId);
+  ).run(
+    filledQuantity,
+    filledQuantity,
+    slicePnlUsd ?? null,
+    filledQuantity,
+    filledQuantity,
+    filledQuantity,
+    filledQuantity,
+    slicePnlUsd ?? null,
+    filledQuantity,
+    filledQuantity,
+    slicePnlUsd ?? null,
+    filledQuantity,
+    positionId
+  );
 }
 
 export function applyPostFillAction(db: Database.Database, executionId: number) {
@@ -530,16 +557,29 @@ export function findPositionById(db: Database.Database, id: number) {
 }
 
 export function markRebalanceRun(db: Database.Database, fundCik: string, reportDate: string): boolean {
-  const result = db.prepare("INSERT OR IGNORE INTO rebalance_runs (fund_cik, report_date, completed_at) VALUES (?, ?, NULL)").run(fundCik, reportDate);
+  const result = db
+    .prepare(
+      "INSERT OR IGNORE INTO rebalance_runs (fund_cik, report_date, status, completed_at) VALUES (?, ?, 'in_progress', NULL)"
+    )
+    .run(fundCik, reportDate);
   return result.changes > 0;
 }
 
-export function clearRebalanceRun(db: Database.Database, fundCik: string, reportDate: string) {
-  db.prepare("DELETE FROM rebalance_runs WHERE fund_cik = ? AND report_date = ?").run(fundCik, reportDate);
+export function markRebalanceRunFailed(
+  db: Database.Database,
+  fundCik: string,
+  reportDate: string,
+  lastError: string
+) {
+  db.prepare(
+    "UPDATE rebalance_runs SET status = 'failed', last_error = ? WHERE fund_cik = ? AND report_date = ?"
+  ).run(lastError, fundCik, reportDate);
 }
 
 export function completeRebalanceRun(db: Database.Database, fundCik: string, reportDate: string) {
-  db.prepare("UPDATE rebalance_runs SET completed_at = datetime('now') WHERE fund_cik = ? AND report_date = ?").run(fundCik, reportDate);
+  db.prepare(
+    "UPDATE rebalance_runs SET status = 'completed', completed_at = datetime('now') WHERE fund_cik = ? AND report_date = ?"
+  ).run(fundCik, reportDate);
 }
 
 export function insertPortfolioSnapshot(

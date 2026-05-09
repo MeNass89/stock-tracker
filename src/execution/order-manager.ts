@@ -178,13 +178,23 @@ export class OrderManager {
           continue;
         }
       } else if (this.shouldCancelByEndOfDay(execution.createdAt)) {
-        await this.alpaca.cancelOrder(execution.alpacaOrderId);
-        if (execution.direction === "sell" && execution.positionId) {
-          const totalFilled = money(order.filled_qty);
-          const unfilled = Math.max(0, execution.quantity - totalFilled);
-          if (unfilled > 0) addPendingExit(this.db, execution.positionId, -unfilled);
+        if (!execution.notes?.includes("cancel-requested")) {
+          try {
+            await this.alpaca.cancelOrder(execution.alpacaOrderId);
+          } catch (error) {
+            logger.warn(
+              { error, executionId: execution.id, alpacaOrderId: execution.alpacaOrderId },
+              "EOD cancel request failed; will retry next tick if execution still pending"
+            );
+            continue;
+          }
+          updateStockExecutionOrder(this.db, execution.id, {
+            notes: `${execution.notes ?? ""} | cancel-requested at 15:45 ET cutoff`.trim()
+          });
         }
-        updateStockExecutionOrder(this.db, execution.id, { status: "cancelled", notes: "cancelled at 15:45 ET cutoff" });
+        // Leave execution in submitted/partial; next monitorOrders() tick will observe
+        // Alpaca's terminal status (cancelled/expired/filled/partially_filled) and route
+        // through the upper reconciliation branch which releases pending qty correctly.
       } else if (this.shouldResubmit(execution.createdAt)) {
         await this.resubmitLimit(execution.id, order);
       }

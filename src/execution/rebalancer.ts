@@ -5,7 +5,7 @@ import { logger } from "../utils/logger.js";
 import { AlpacaClient } from "./alpaca-client.js";
 import { OrderManager } from "./order-manager.js";
 import { SignalFilter } from "./signal-filter.js";
-import { clearRebalanceRun, completeRebalanceRun, markRebalanceRun, openStockPositions } from "../db/queries.js";
+import { completeRebalanceRun, markRebalanceRun, markRebalanceRunFailed, openStockPositions } from "../db/queries.js";
 
 export class Rebalancer {
   private readonly signalFilter: SignalFilter;
@@ -33,8 +33,12 @@ export class Rebalancer {
       await this.executeDiffs(diffs, first.fundCik, first.reportDate);
       completeRebalanceRun(this.db, first.fundCik, first.reportDate);
     } catch (error) {
-      logger.error({ error, fundCik: first.fundCik, reportDate: first.reportDate }, "rebalance failed; clearing claim so it can be retried");
-      clearRebalanceRun(this.db, first.fundCik, first.reportDate);
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(
+        { error, fundCik: first.fundCik, reportDate: first.reportDate },
+        "rebalance failed; persisting failed claim (manual intervention required to retry)"
+      );
+      markRebalanceRunFailed(this.db, first.fundCik, first.reportDate, message);
       throw error;
     }
   }
@@ -59,8 +63,12 @@ export class Rebalancer {
         await this.executeDiffs(diffs, row.fund_cik, row.report_date);
         completeRebalanceRun(this.db, row.fund_cik, row.report_date);
       } catch (error) {
-        logger.error({ error, fundCik: row.fund_cik, reportDate: row.report_date }, "rebalance failed; clearing claim so it can be retried");
-        clearRebalanceRun(this.db, row.fund_cik, row.report_date);
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error(
+          { error, fundCik: row.fund_cik, reportDate: row.report_date },
+          "rebalance failed; persisting failed claim (manual intervention required to retry)"
+        );
+        markRebalanceRunFailed(this.db, row.fund_cik, row.report_date, message);
       }
     }
   }

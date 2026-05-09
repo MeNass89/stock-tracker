@@ -52,7 +52,12 @@ export function buildServer() {
       "Access-Control-Allow-Origin": "http://localhost:5173"
     });
     const timer = setInterval(() => {
-      reply.raw.write(`event: heartbeat\ndata: ${JSON.stringify({ at: new Date().toISOString() })}\n\n`);
+      try {
+        reply.raw.write(`event: heartbeat\ndata: ${JSON.stringify({ at: new Date().toISOString() })}\n\n`);
+      } catch {
+        clearInterval(timer);
+        sseClients.delete(reply.raw);
+      }
     }, 15_000);
     sseClients.add(reply.raw);
     reply.raw.on("close", () => {
