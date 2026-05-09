@@ -192,6 +192,7 @@ CREATE INDEX IF NOT EXISTS idx_rankings_politician ON rankings(politician_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_type ON alerts(type);
 CREATE INDEX IF NOT EXISTS idx_stock_exec_status ON stock_executions(status);
 CREATE INDEX IF NOT EXISTS idx_stock_exec_ticker ON stock_executions(ticker);
+CREATE INDEX IF NOT EXISTS idx_stock_exec_position_id ON stock_executions(position_id);
 CREATE INDEX IF NOT EXISTS idx_stock_pos_status ON stock_positions(status);
 CREATE INDEX IF NOT EXISTS idx_stock_pos_ticker ON stock_positions(ticker);
 CREATE INDEX IF NOT EXISTS idx_snapshots_time ON portfolio_snapshots(snapshot_at);
@@ -214,7 +215,8 @@ const idempotentMigrations: string[] = [
     PRIMARY KEY (fund_cik, report_date)
   )`,
   "ALTER TABLE rebalance_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'in_progress'",
-  "ALTER TABLE rebalance_runs ADD COLUMN last_error TEXT"
+  "ALTER TABLE rebalance_runs ADD COLUMN last_error TEXT",
+  "CREATE INDEX IF NOT EXISTS idx_stock_exec_position_id ON stock_executions(position_id)"
 ];
 
 function runIdempotentMigrations(db: Database.Database) {

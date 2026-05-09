@@ -13,7 +13,13 @@ import { FUND_MANAGERS } from "../tracking/fund-manager-tracker.js";
 const sseClients = new Set<ServerResponse>();
 
 export function broadcastSSE(event: string, data: unknown) {
-  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  let serialized = "null";
+  try {
+    serialized = JSON.stringify(data);
+  } catch {
+    // Keep the broadcast path alive on non-serializable payloads.
+  }
+  const payload = `event: ${event}\ndata: ${serialized}\n\n`;
   for (const client of sseClients) {
     try {
       client.write(payload);
