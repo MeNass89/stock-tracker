@@ -478,12 +478,53 @@ export function applyPartialFill(
   db: Database.Database,
   positionId: number,
   filledQuantity: number,
-  slicePnlUsd?: number | null
+  slicePnlUsd?: number | null,
+  releaseReservation: boolean = true
 ) {
+  if (releaseReservation) {
+    db.prepare(
+      `UPDATE stock_positions
+       SET quantity = MAX(0, quantity - ?),
+           pending_exit_qty = MAX(0, COALESCE(pending_exit_qty, 0) - ?),
+           realized_pnl_usd = COALESCE(realized_pnl_usd, 0) + COALESCE(?, 0),
+           realized_qty = COALESCE(realized_qty, 0) + ?,
+           status = CASE WHEN MAX(0, quantity - ?) <= 0 THEN 'closed' ELSE 'partial' END,
+           closed_at = CASE WHEN MAX(0, quantity - ?) <= 0 THEN CURRENT_TIMESTAMP ELSE closed_at END,
+           pnl_usd = CASE
+             WHEN MAX(0, quantity - ?) <= 0
+               THEN COALESCE(realized_pnl_usd, 0) + COALESCE(?, 0)
+             ELSE pnl_usd
+           END,
+           pnl_ratio = CASE
+             WHEN MAX(0, quantity - ?) <= 0
+               AND avg_entry_price > 0
+               AND (COALESCE(realized_qty, 0) + ?) > 0
+               THEN (COALESCE(realized_pnl_usd, 0) + COALESCE(?, 0))
+                    / (avg_entry_price * (COALESCE(realized_qty, 0) + ?))
+             ELSE pnl_ratio
+           END
+       WHERE id = ?`
+    ).run(
+      filledQuantity,
+      filledQuantity,
+      slicePnlUsd ?? null,
+      filledQuantity,
+      filledQuantity,
+      filledQuantity,
+      filledQuantity,
+      slicePnlUsd ?? null,
+      filledQuantity,
+      filledQuantity,
+      slicePnlUsd ?? null,
+      filledQuantity,
+      positionId
+    );
+    return;
+  }
+
   db.prepare(
     `UPDATE stock_positions
      SET quantity = MAX(0, quantity - ?),
-         pending_exit_qty = MAX(0, COALESCE(pending_exit_qty, 0) - ?),
          realized_pnl_usd = COALESCE(realized_pnl_usd, 0) + COALESCE(?, 0),
          realized_qty = COALESCE(realized_qty, 0) + ?,
          status = CASE WHEN MAX(0, quantity - ?) <= 0 THEN 'closed' ELSE 'partial' END,
@@ -503,7 +544,6 @@ export function applyPartialFill(
          END
      WHERE id = ?`
   ).run(
-    filledQuantity,
     filledQuantity,
     slicePnlUsd ?? null,
     filledQuantity,
@@ -543,11 +583,16 @@ export function markExecutionReconcileFailed(db: Database.Database, executionId:
     ).run(reason, executionId);
 
     if (execution?.direction === "sell" && execution.position_id) {
+      const row = db.prepare(
+        "SELECT COALESCE(pending_exit_qty, 0) AS pending FROM stock_positions WHERE id = ?"
+      ).get(execution.position_id) as { pending: number } | undefined;
+      const currentPending = row?.pending ?? 0;
+      const releaseAmount = Math.min(execution.quantity, currentPending);
       db.prepare(
         `UPDATE stock_positions
          SET pending_exit_qty = MAX(0, COALESCE(pending_exit_qty, 0) - ?)
          WHERE id = ?`
-      ).run(execution.quantity, execution.position_id);
+      ).run(releaseAmount, execution.position_id);
     }
   });
   tx();
@@ -561,7 +606,13 @@ export function findPositionById(db: Database.Database, id: number) {
 export function markRebalanceRun(db: Database.Database, fundCik: string, reportDate: string): boolean {
   const result = db
     .prepare(
-      "INSERT OR IGNORE INTO rebalance_runs (fund_cik, report_date, status, completed_at) VALUES (?, ?, 'in_progress', NULL)"
+      `INSERT INTO rebalance_runs (fund_cik, report_date, status, completed_at, last_error)
+       VALUES (?, ?, 'in_progress', NULL, NULL)
+       ON CONFLICT(fund_cik, report_date) DO UPDATE
+         SET status = 'in_progress',
+             completed_at = NULL,
+             last_error = NULL
+         WHERE rebalance_runs.status = 'failed'`
     )
     .run(fundCik, reportDate);
   return result.changes > 0;

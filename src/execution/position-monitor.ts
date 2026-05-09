@@ -147,7 +147,7 @@ export class PositionMonitor {
       const pnlRatio = position.avgEntryPrice > 0 ? (filledPrice - position.avgEntryPrice) / position.avgEntryPrice : null;
       const exitReason = orderId === position.trailingStopOrderId ? "trailing_stop" : "stop_loss";
       if (filledQty < position.quantity) {
-        applyPartialFill(this.db, position.id, filledQty, pnlUsd);
+        applyPartialFill(this.db, position.id, filledQty, pnlUsd, false);
       } else {
         closeStockPosition(this.db, position.id, exitReason, pnlUsd, filledQty);
       }
