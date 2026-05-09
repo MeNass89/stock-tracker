@@ -96,7 +96,6 @@ export class PositionMonitor {
     await this.orderManager.submitMarketExit(position.id, position.ticker, position.quantity, reason, position.sleeve, true);
     const pnlUsd = (currentPrice - position.avgEntryPrice) * position.quantity;
     const pnlRatio = (currentPrice - position.avgEntryPrice) / position.avgEntryPrice;
-    if (pnlUsd < 0) this.trackWashSaleIfNeeded(position.ticker, pnlUsd);
     await this.alert("stop_triggered", position, { exitReason: "soft_stop", pnlUsd, pnlRatio });
     return true;
   }
@@ -121,9 +120,9 @@ export class PositionMonitor {
 
       const filledPrice = money(order.filled_avg_price ?? undefined) || position.stopLossPrice || position.currentPrice || position.avgEntryPrice;
       const pnlUsd = (filledPrice - position.avgEntryPrice) * position.quantity;
-      const pnlRatio = (filledPrice - position.avgEntryPrice) / position.avgEntryPrice;
+      const pnlRatio = position.avgEntryPrice > 0 ? (filledPrice - position.avgEntryPrice) / position.avgEntryPrice : null;
       const exitReason = orderId === position.trailingStopOrderId ? "trailing_stop" : "stop_loss";
-      closeStockPosition(this.db, position.id, exitReason, pnlUsd, pnlRatio);
+      closeStockPosition(this.db, position.id, exitReason, pnlUsd, position.quantity);
       this.trackWashSaleIfNeeded(position.ticker, pnlUsd);
       await this.alert("stop_triggered", position, { exitReason, pnlUsd, pnlRatio });
       return true;
@@ -162,8 +161,8 @@ export class PositionMonitor {
 
   private async sellHalf(position: StockPosition, reason: "take_profit" | "time_stop") {
     const quantity = position.quantity / 2;
-    await this.orderManager.submitMarketExit(position.id, position.ticker, quantity, reason, position.sleeve, false);
-    this.db.prepare("UPDATE stock_positions SET day60_exited_half = 1 WHERE id = ?").run(position.id);
+    const postFillAction = reason === "time_stop" ? "day60_half" : null;
+    await this.orderManager.submitMarketExit(position.id, position.ticker, quantity, reason, position.sleeve, false, postFillAction);
     await this.alert(reason, position, { quantity });
   }
 

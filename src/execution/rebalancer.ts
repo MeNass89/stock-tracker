@@ -74,14 +74,18 @@ export class Rebalancer {
       await this.orderManager.submitSignal(decision);
     }
 
-    await this.alertEngine?.executionNotification({
-      type: "rebalance",
-      ticker: "13F",
-      direction: "buy",
-      size: buys.length,
-      reason: `processed ${sells.length} sells and ${buys.length} buys`
-    });
     markRebalanceRun(this.db, fundCik, reportDate);
+    try {
+      await this.alertEngine?.executionNotification({
+        type: "rebalance",
+        ticker: "13F",
+        direction: "buy",
+        size: buys.length,
+        reason: `processed ${sells.length} sells and ${buys.length} buys`
+      });
+    } catch (error) {
+      logger.warn({ error, fundCik, reportDate }, "rebalance alert failed (run already persisted)");
+    }
   }
 
   private async rebalanceSell(holding: FundHoldingInput) {

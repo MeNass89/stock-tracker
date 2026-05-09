@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS stock_executions (
   senator_rank INTEGER,
   fund_name TEXT,
   notes TEXT,
+  post_fill_action TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   submitted_at TEXT,
   filled_at TEXT
@@ -142,6 +143,8 @@ CREATE TABLE IF NOT EXISTS stock_positions (
   status TEXT CHECK(status IN ('open', 'partial', 'closed')) DEFAULT 'open',
   pnl_usd REAL,
   pnl_ratio REAL,
+  realized_pnl_usd REAL DEFAULT 0,
+  realized_qty REAL DEFAULT 0,
   pending_exit_qty REAL DEFAULT 0,
   opened_at TEXT DEFAULT (datetime('now')),
   closed_at TEXT,
@@ -194,7 +197,10 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_time ON portfolio_snapshots(snapshot_at
 
 const idempotentMigrations: string[] = [
   "ALTER TABLE stock_executions ADD COLUMN position_id INTEGER REFERENCES stock_positions(id)",
+  "ALTER TABLE stock_executions ADD COLUMN post_fill_action TEXT",
   "ALTER TABLE stock_positions ADD COLUMN pending_exit_qty REAL DEFAULT 0",
+  "ALTER TABLE stock_positions ADD COLUMN realized_pnl_usd REAL DEFAULT 0",
+  "ALTER TABLE stock_positions ADD COLUMN realized_qty REAL DEFAULT 0",
   "ALTER TABLE stock_positions RENAME COLUMN pnl_pct TO pnl_ratio",
   "ALTER TABLE portfolio_snapshots RENAME COLUMN daily_pnl_pct TO daily_pnl_ratio",
   `CREATE TABLE IF NOT EXISTS rebalance_runs (

@@ -237,8 +237,8 @@ export function insertStockExecution(db: Database.Database, execution: StockExec
       `INSERT INTO stock_executions (
         trigger_type, trigger_id, position_id, sleeve, ticker, direction, quantity, limit_price,
         filled_price, filled_quantity, amount_usd, alpaca_order_id, alpaca_client_order_id,
-        status, senator_name, senator_rank, fund_name, notes, submitted_at, filled_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        status, senator_name, senator_rank, fund_name, notes, post_fill_action, submitted_at, filled_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       execution.triggerType,
@@ -259,6 +259,7 @@ export function insertStockExecution(db: Database.Database, execution: StockExec
       execution.senatorRank ?? null,
       execution.fundName ?? null,
       execution.notes ?? null,
+      execution.postFillAction ?? null,
       execution.status === "submitted" ? new Date().toISOString() : null,
       execution.status === "filled" ? new Date().toISOString() : null
     );
@@ -423,31 +424,79 @@ export function markStockPositionTimeCheck(db: Database.Database, id: number, fi
   db.prepare(`UPDATE stock_positions SET ${field} = 1 WHERE id = ?`).run(id);
 }
 
-export function closeStockPosition(db: Database.Database, id: number, exitReason: string, pnlUsd?: number | null, pnlRatio?: number | null) {
+export function closeStockPosition(
+  db: Database.Database,
+  id: number,
+  exitReason: string,
+  slicePnlUsd?: number | null,
+  sliceFilledQty?: number | null
+) {
   db.prepare(
     `UPDATE stock_positions
      SET status = 'closed',
          closed_at = datetime('now'),
          exit_reason = ?,
-         pnl_usd = coalesce(?, pnl_usd),
-         pnl_ratio = coalesce(?, pnl_ratio),
+         realized_pnl_usd = COALESCE(realized_pnl_usd, 0) + COALESCE(?, 0),
+         realized_qty = COALESCE(realized_qty, 0) + COALESCE(?, 0),
+         pnl_usd = COALESCE(realized_pnl_usd, 0) + COALESCE(?, 0),
+         pnl_ratio = CASE
+           WHEN avg_entry_price > 0 AND (COALESCE(realized_qty, 0) + COALESCE(?, 0)) > 0
+             THEN (COALESCE(realized_pnl_usd, 0) + COALESCE(?, 0))
+                  / (avg_entry_price * (COALESCE(realized_qty, 0) + COALESCE(?, 0)))
+           ELSE pnl_ratio
+         END,
          pending_exit_qty = 0
      WHERE id = ?`
-  ).run(exitReason, pnlUsd ?? null, pnlRatio ?? null, id);
+  ).run(
+    exitReason,
+    slicePnlUsd ?? null,
+    sliceFilledQty ?? null,
+    slicePnlUsd ?? null,
+    sliceFilledQty ?? null,
+    slicePnlUsd ?? null,
+    sliceFilledQty ?? null,
+    id
+  );
 }
 
 export function addPendingExit(db: Database.Database, positionId: number, quantity: number) {
   db.prepare("UPDATE stock_positions SET pending_exit_qty = COALESCE(pending_exit_qty, 0) + ? WHERE id = ?").run(quantity, positionId);
 }
 
-export function applyPartialFill(db: Database.Database, positionId: number, filledQuantity: number) {
+export function applyPartialFill(
+  db: Database.Database,
+  positionId: number,
+  filledQuantity: number,
+  slicePnlUsd?: number | null
+) {
   db.prepare(
     `UPDATE stock_positions
      SET quantity = MAX(0, quantity - ?),
          pending_exit_qty = MAX(0, COALESCE(pending_exit_qty, 0) - ?),
+         realized_pnl_usd = COALESCE(realized_pnl_usd, 0) + COALESCE(?, 0),
+         realized_qty = COALESCE(realized_qty, 0) + ?,
          status = CASE WHEN MAX(0, quantity - ?) <= 0 THEN 'closed' ELSE 'partial' END
      WHERE id = ?`
-  ).run(filledQuantity, filledQuantity, filledQuantity, positionId);
+  ).run(filledQuantity, filledQuantity, slicePnlUsd ?? null, filledQuantity, filledQuantity, positionId);
+}
+
+export function applyPostFillAction(db: Database.Database, executionId: number) {
+  const row = db
+    .prepare("SELECT post_fill_action, position_id FROM stock_executions WHERE id = ?")
+    .get(executionId) as { post_fill_action: string | null; position_id: number | null } | undefined;
+  if (!row?.post_fill_action || !row.position_id) return;
+  if (row.post_fill_action === "day60_half") {
+    db.prepare("UPDATE stock_positions SET day60_exited_half = 1 WHERE id = ?").run(row.position_id);
+  }
+}
+
+export function markExecutionReconcileFailed(db: Database.Database, executionId: number, reason: string) {
+  db.prepare(
+    `UPDATE stock_executions
+     SET status = 'failed',
+         notes = COALESCE(notes, '') || ' | RECONCILE_FAILED: ' || ?
+     WHERE id = ?`
+  ).run(reason, executionId);
 }
 
 export function findPositionById(db: Database.Database, id: number) {
@@ -541,6 +590,7 @@ function mapStockExecution(row: any): StockExecution {
     senatorRank: row.senator_rank,
     fundName: row.fund_name,
     notes: row.notes,
+    postFillAction: row.post_fill_action,
     createdAt: row.created_at,
     submittedAt: row.submitted_at,
     filledAt: row.filled_at
@@ -573,6 +623,8 @@ function mapStockPosition(row: any): StockPosition {
     status: row.status,
     pnlUsd: row.pnl_usd,
     pnlRatio: row.pnl_ratio,
+    realizedPnlUsd: row.realized_pnl_usd,
+    realizedQty: row.realized_qty,
     pendingExitQty: row.pending_exit_qty,
     openedAt: row.opened_at,
     closedAt: row.closed_at,

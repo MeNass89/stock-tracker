@@ -120,6 +120,7 @@ export interface StockExecutionInput {
   senatorRank?: number | null;
   fundName?: string | null;
   notes?: string | null;
+  postFillAction?: string | null;
 }
 
 export interface StockExecution extends StockExecutionInput {
@@ -155,6 +156,8 @@ export interface StockPositionInput {
   status?: PositionStatus;
   pnlUsd?: number | null;
   pnlRatio?: number | null;
+  realizedPnlUsd?: number | null;
+  realizedQty?: number | null;
   pendingExitQty?: number | null;
   exitReason?: string | null;
 }

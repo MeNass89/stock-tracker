@@ -3,11 +3,13 @@ import { config } from "../config.js";
 import {
   addPendingExit,
   applyPartialFill,
+  applyPostFillAction,
   closeStockPosition,
   findPositionById,
   insertWashSale,
   insertStockExecution,
   insertStockPosition,
+  markExecutionReconcileFailed,
   openStockPositions,
   pendingStockExecutions,
   updateStockExecutionFill,
@@ -143,24 +145,26 @@ export class OrderManager {
           });
         } else if (execution.direction === "sell") {
           if (!execution.positionId) {
-            logger.warn({ executionId: execution.id, ticker: execution.ticker }, "sell fill missing position_id; cannot reconcile");
+            logger.error({ executionId: execution.id, ticker: execution.ticker }, "sell fill missing position_id; flagging for manual reconciliation");
+            markExecutionReconcileFailed(this.db, execution.id, "sell fill missing position_id");
             continue;
           }
           const position = findPositionById(this.db, execution.positionId);
           if (!position) {
-            logger.warn({ executionId: execution.id, positionId: execution.positionId }, "sell fill references unknown position");
+            logger.error({ executionId: execution.id, positionId: execution.positionId }, "sell fill references unknown position; flagging for manual reconciliation");
+            markExecutionReconcileFailed(this.db, execution.id, `position ${execution.positionId} not found`);
             continue;
           }
           const filledPrice = money(order.filled_avg_price ?? undefined);
           const filledQty = money(order.filled_qty);
-          const pnlUsd = filledPrice > 0 ? (filledPrice - position.avgEntryPrice) * filledQty : null;
-          const pnlRatio = filledPrice > 0 ? (filledPrice - position.avgEntryPrice) / position.avgEntryPrice : null;
-          if (pnlUsd !== null && pnlUsd < 0) this.trackWashSaleIfNeeded(position.ticker, pnlUsd);
+          const slicePnlUsd = filledPrice > 0 ? (filledPrice - position.avgEntryPrice) * filledQty : null;
+          if (slicePnlUsd !== null && slicePnlUsd < 0) this.trackWashSaleIfNeeded(position.ticker, slicePnlUsd);
           const remainingAfter = Math.max(0, position.quantity - filledQty);
           if (remainingAfter <= 0) {
-            closeStockPosition(this.db, position.id, execution.triggerType ?? "manual", pnlUsd, pnlRatio);
+            closeStockPosition(this.db, position.id, execution.triggerType ?? "manual", slicePnlUsd, filledQty);
           } else {
-            applyPartialFill(this.db, position.id, filledQty);
+            applyPartialFill(this.db, position.id, filledQty, slicePnlUsd);
+            applyPostFillAction(this.db, execution.id);
           }
         }
       } else if (this.shouldCancelByEndOfDay(execution.createdAt)) {
@@ -172,7 +176,24 @@ export class OrderManager {
     }
   }
 
-  async submitMarketExit(positionId: number, ticker: string, quantity: number, reason: string, sleeve: ExecutionSleeve = "senator", closeOnFill = true) {
+  async submitMarketExit(
+    positionId: number,
+    ticker: string,
+    quantity: number,
+    reason: string,
+    sleeve: ExecutionSleeve = "senator",
+    closeOnFill = true,
+    postFillAction: string | null = null
+  ) {
+    const position = findPositionById(this.db, positionId);
+    if (!position) {
+      throw new Error(`submitMarketExit: position ${positionId} not found`);
+    }
+    const available = Math.max(0, position.quantity - (position.pendingExitQty ?? 0));
+    if (quantity > available + 1e-9) {
+      throw new Error(`submitMarketExit: requested ${quantity} exceeds available ${available} (qty=${position.quantity}, pending=${position.pendingExitQty ?? 0})`);
+    }
+
     const executionId = insertStockExecution(this.db, {
       triggerType: reasonToTrigger(reason),
       positionId,
@@ -181,34 +202,46 @@ export class OrderManager {
       direction: "sell",
       quantity,
       status: "pending",
-      notes: reason
+      notes: reason,
+      postFillAction
     });
-    addPendingExit(this.db, positionId, quantity);
+
     const isFractional = quantity % 1 !== 0;
-    const order = await this.alpaca.submitOrder({
-      symbol: ticker,
-      qty: quantity.toString(),
-      side: "sell",
-      type: "market",
-      time_in_force: isFractional ? "day" : "gtc",
-      client_order_id: `st-exit-${executionId}-${Date.now()}`
-    });
+    let order: AlpacaOrder;
+    try {
+      order = await this.alpaca.submitOrder({
+        symbol: ticker,
+        qty: quantity.toString(),
+        side: "sell",
+        type: "market",
+        time_in_force: isFractional ? "day" : "gtc",
+        client_order_id: `st-exit-${executionId}-${Date.now()}`
+      });
+    } catch (error) {
+      updateStockExecutionOrder(this.db, executionId, {
+        status: "failed",
+        notes: `submit failed: ${error instanceof Error ? error.message : String(error)}`
+      });
+      throw error;
+    }
+
+    addPendingExit(this.db, positionId, quantity);
     updateStockExecutionOrder(this.db, executionId, {
       alpacaOrderId: order.id,
       alpacaClientOrderId: order.client_order_id,
       status: mapOrderStatus(order.status)
     });
+
     if (mapOrderStatus(order.status) === "filled") {
       const filledPrice = money(order.filled_avg_price ?? undefined);
       const filledQty = money(order.filled_qty) || quantity;
-      const position = findPositionById(this.db, positionId);
-      const pnlUsd = position && filledPrice > 0 ? (filledPrice - position.avgEntryPrice) * filledQty : null;
-      const pnlRatio = position && filledPrice > 0 ? (filledPrice - position.avgEntryPrice) / position.avgEntryPrice : null;
-      if (pnlUsd !== null && pnlUsd < 0) this.trackWashSaleIfNeeded(ticker, pnlUsd);
+      const slicePnlUsd = filledPrice > 0 ? (filledPrice - position.avgEntryPrice) * filledQty : null;
+      if (slicePnlUsd !== null && slicePnlUsd < 0) this.trackWashSaleIfNeeded(ticker, slicePnlUsd);
       if (closeOnFill) {
-        closeStockPosition(this.db, positionId, reason, pnlUsd, pnlRatio);
+        closeStockPosition(this.db, positionId, reason, slicePnlUsd, filledQty);
       } else {
-        applyPartialFill(this.db, positionId, filledQty);
+        applyPartialFill(this.db, positionId, filledQty, slicePnlUsd);
+        applyPostFillAction(this.db, executionId);
       }
     }
     return order;
